@@ -37,8 +37,6 @@
 
 #include "memdbg.h"
 
-#include "forward-inline.h"
-
 #define P2P_CHECK_SIG() EVENT_LOOP_CHECK_SIGNAL(c, process_signal_p2p, c);
 
 static bool
@@ -329,6 +327,7 @@ openvpn_main(int argc, char *argv[])
             }
             while (c.sig->signal_received == SIGUSR1);
 
+            env_set_destroy(c.es);
             uninit_options(&c.options);
             gc_reset(&c.gc);
         }
@@ -336,8 +335,6 @@ openvpn_main(int argc, char *argv[])
     }
 
     context_gc_free(&c);
-
-    env_set_destroy(c.es);
 
 #ifdef ENABLE_MANAGEMENT
     /* close management interface */

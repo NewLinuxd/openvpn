@@ -36,7 +36,7 @@
 #include "common.h"
 #include "error.h"
 #include "route.h"
-#include "misc.h"
+#include "run_command.h"
 #include "socket.h"
 #include "manage.h"
 #include "win32.h"
@@ -447,11 +447,6 @@ init_route_ipv6(struct route_ipv6 *r6,
     else if (rl6->spec_flags & RTSA_REMOTE_ENDPOINT)
     {
         r6->gateway = rl6->remote_endpoint_ipv6;
-    }
-    else
-    {
-        msg(M_WARN, PACKAGE_NAME " ROUTE6: " PACKAGE_NAME " needs a gateway parameter for a --route-ipv6 option and no default was specified by either --route-ipv6-gateway or --ifconfig-ipv6 options");
-        goto fail;
     }
 
     /* metric */
@@ -1322,7 +1317,7 @@ print_default_gateway(const int msglevel,
 #ifdef _WIN32
         if (rgi->flags & RGI_IFACE_DEFINED)
         {
-            buf_printf(&out, " I=%u", (unsigned int)rgi->adapter_index);
+            buf_printf(&out, " I=%lu", rgi->adapter_index);
         }
 #else
         if (rgi->flags & RGI_IFACE_DEFINED)
@@ -1353,7 +1348,7 @@ print_default_gateway(const int msglevel,
 #ifdef _WIN32
         if (rgi6->flags & RGI_IFACE_DEFINED)
         {
-            buf_printf(&out, " I=%u", (unsigned int)rgi6->adapter_index);
+            buf_printf(&out, " I=%lu", rgi6->adapter_index);
         }
 #else
         if (rgi6->flags & RGI_IFACE_DEFINED)
@@ -1627,7 +1622,7 @@ add_route(struct route_ipv4 *r,
         if (is_on_link(is_local_route, flags, rgi))
         {
             ai = rgi->adapter_index;
-            argv_printf_cat(&argv, "IF %u", (unsigned int)ai);
+            argv_printf_cat(&argv, "IF %lu", ai);
         }
 
         argv_msg(D_ROUTE, &argv);
@@ -1820,12 +1815,12 @@ done:
 }
 
 
-static void
+void
 route_ipv6_clear_host_bits( struct route_ipv6 *r6 )
 {
     /* clear host bit parts of route
      * (needed if routes are specified improperly, or if we need to
-     * explicitely setup/clear the "connected" network routes on some OSes)
+     * explicitly setup/clear the "connected" network routes on some OSes)
      */
     int byte = 15;
     int bits_to_clear = 128 - r6->netbits;
@@ -1917,6 +1912,16 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flag
         gateway_needed = true;
     }
 
+    if (gateway_needed && IN6_IS_ADDR_UNSPECIFIED(&r6->gateway))
+    {
+        msg(M_WARN, "ROUTE6 WARNING: " PACKAGE_NAME " needs a gateway "
+            "parameter for a --route-ipv6 option and no default was set via "
+            "--ifconfig-ipv6 or --route-ipv6-gateway option.  Not installing "
+            "IPv6 route to %s/%d.", network, r6->netbits);
+        status = false;
+        goto done;
+    }
+
 #if defined(TARGET_LINUX)
 #ifdef ENABLE_IPROUTE
     argv_printf(&argv, "%s -6 route add %s/%d dev %s",
@@ -1969,12 +1974,12 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flag
         struct buffer out = alloc_buf_gc(64, &gc);
         if (r6->adapter_index)          /* vpn server special route */
         {
-            buf_printf(&out, "interface=%d", r6->adapter_index );
+            buf_printf(&out, "interface=%lu", r6->adapter_index );
             gateway_needed = true;
         }
         else
         {
-            buf_printf(&out, "interface=%d", tt->adapter_index );
+            buf_printf(&out, "interface=%lu", tt->adapter_index );
         }
         device = buf_bptr(&out);
 
@@ -2114,6 +2119,7 @@ add_route_ipv6(struct route_ipv6 *r6, const struct tuntap *tt, unsigned int flag
     msg(M_FATAL, "Sorry, but I don't know how to do 'route ipv6' commands on this operating system.  Try putting your routes in a --route-up script");
 #endif /* if defined(TARGET_LINUX) */
 
+done:
     if (status)
     {
         r6->flags |= RT_ADDED;
@@ -2416,12 +2422,12 @@ delete_route_ipv6(const struct route_ipv6 *r6, const struct tuntap *tt, unsigned
         struct buffer out = alloc_buf_gc(64, &gc);
         if (r6->adapter_index)          /* vpn server special route */
         {
-            buf_printf(&out, "interface=%d", r6->adapter_index );
+            buf_printf(&out, "interface=%lu", r6->adapter_index );
             gateway_needed = true;
         }
         else
         {
-            buf_printf(&out, "interface=%d", tt->adapter_index );
+            buf_printf(&out, "interface=%lu", tt->adapter_index );
         }
         device = buf_bptr(&out);
 
@@ -2642,7 +2648,11 @@ test_routes(const struct route_list *rl, const struct tuntap *tt)
         ret = true;
         adapter_up = true;
 
-        if (rl)
+        /* we do this test only if we have IPv4 routes to install, and if
+         * the tun/tap interface has seen IPv4 ifconfig - because if we
+         * have no IPv4, the check will always fail, failing tun init
+         */
+        if (rl && tt->did_ifconfig_setup)
         {
             struct route_ipv4 *r;
             for (r = rl->routes, len = 0; r; r = r->next, ++len)
@@ -2780,7 +2790,6 @@ windows_route_find_if_index(const struct route_ipv4 *r, const struct tuntap *tt)
         msg(M_WARN, "Warning: route gateway is ambiguous: %s (%d matches)",
             print_in_addr_t(r->gateway, 0, &gc),
             count);
-        ret = TUN_ADAPTER_INDEX_INVALID;
     }
 
     dmsg(D_ROUTE_DEBUG, "DEBUG: route find if: on_tun=%d count=%d index=%d",
@@ -2842,7 +2851,7 @@ get_default_gateway_ipv6(struct route_ipv6_gateway_info *rgi6,
         goto done;
     }
 
-    msg( D_ROUTE, "GDG6: II=%d DP=%s/%d NH=%s",
+    msg( D_ROUTE, "GDG6: II=%lu DP=%s/%d NH=%s",
          BestRoute.InterfaceIndex,
          print_in6_addr( BestRoute.DestinationPrefix.Prefix.Ipv6.sin6_addr, 0, &gc),
          BestRoute.DestinationPrefix.PrefixLength,
@@ -2988,22 +2997,18 @@ del_route_ipapi(const struct route_ipv4 *r, const struct tuntap *tt)
 static bool
 do_route_service(const bool add, const route_message_t *rt, const size_t size, HANDLE pipe)
 {
-    DWORD len;
     bool ret = false;
     ack_message_t ack;
     struct gc_arena gc = gc_new();
 
-    if (!WriteFile(pipe, rt, size, &len, NULL)
-        || !ReadFile(pipe, &ack, sizeof(ack), &len, NULL))
+    if (!send_msg_iservice(pipe, rt, size, &ack, "ROUTE"))
     {
-        msg(M_WARN, "ROUTE: could not talk to service: %s [%lu]",
-            strerror_win32(GetLastError(), &gc), GetLastError());
         goto out;
     }
 
     if (ack.error_number != NO_ERROR)
     {
-        msg(M_WARN, "ROUTE: route %s failed using service: %s [status=%u if_index=%lu]",
+        msg(M_WARN, "ROUTE: route %s failed using service: %s [status=%u if_index=%d]",
             (add ? "addition" : "deletion"), strerror_win32(ack.error_number, &gc),
             ack.error_number, rt->iface.index);
         goto out;
@@ -3075,7 +3080,7 @@ do_route_ipv6_service(const bool add, const struct route_ipv6 *r, const struct t
      * (only do this for routes actually using the tun/tap device)
      */
     if (tt->type == DEV_TYPE_TUN
-	 && msg.iface.index == tt->adapter_index )
+        && msg.iface.index == tt->adapter_index)
     {
         inet_pton(AF_INET6, "fe80::8", &msg.gateway.ipv6);
     }
@@ -3244,6 +3249,12 @@ get_default_gateway(struct route_gateway_info *rgi)
     rgi->gateway.addr = 127 << 24 | 'd' << 16 | 'g' << 8 | 'w';
     rgi->flags |= RGI_ADDR_DEFINED;
     strcpy(best_name, "android-gw");
+
+    /*
+     * Skip scanning/fetching interface from loopback interface
+     * It always fails and "ioctl(SIOCGIFCONF) failed" confuses users
+     */
+    goto done;
 #endif /* ifndef TARGET_ANDROID */
 
     /* scan adapter list */
@@ -3293,7 +3304,7 @@ get_default_gateway(struct route_gateway_info *rgi)
                 if (rgi->flags & RGI_ON_LINK)
                 {
                     /* check that interface name of current interface
-                     * matches interface name of best default route */
+                    * matches interface name of best default route */
                     if (strcmp(ifreq.ifr_name, best_name))
                     {
                         continue;

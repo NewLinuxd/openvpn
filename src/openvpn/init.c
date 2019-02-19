@@ -35,12 +35,14 @@
 
 #include "win32.h"
 #include "init.h"
+#include "run_command.h"
 #include "sig.h"
 #include "occ.h"
 #include "list.h"
 #include "otime.h"
 #include "pool.h"
 #include "gremlin.h"
+#include "occ.h"
 #include "pkcs11.h"
 #include "ps.h"
 #include "lladdr.h"
@@ -48,11 +50,10 @@
 #include "mstats.h"
 #include "ssl_verify.h"
 #include "tls_crypt.h"
-#include "forward-inline.h"
+#include "forward.h"
 
 #include "memdbg.h"
 
-#include "occ-inline.h"
 
 static struct context *static_context; /* GLOBAL */
 
@@ -539,7 +540,7 @@ init_query_passwords(const struct context *c)
     /* Auth user/pass input */
     if (c->options.auth_user_pass_file)
     {
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
         auth_user_pass_setup(c->options.auth_user_pass_file, &c->options.sc_info);
 #else
         auth_user_pass_setup(c->options.auth_user_pass_file, NULL);
@@ -611,6 +612,27 @@ uninit_proxy(struct context *c)
     uninit_proxy_dowork(c);
 }
 
+/*
+ * Saves the initial state of NCP-regotiable
+ * options into a storage which persists over SIGUSR1.
+ */
+static void
+save_ncp_options(struct context *c)
+{
+    c->c1.ciphername = c->options.ciphername;
+    c->c1.authname = c->options.authname;
+    c->c1.keysize = c->options.keysize;
+}
+
+/* Restores NCP-negotiable options to original values */
+static void
+restore_ncp_options(struct context *c)
+{
+    c->options.ciphername = c->c1.ciphername;
+    c->options.authname = c->c1.authname;
+    c->options.keysize = c->c1.keysize;
+}
+
 void
 context_init_1(struct context *c)
 {
@@ -619,6 +641,8 @@ context_init_1(struct context *c)
     packet_id_persist_init(&c->c1.pid_persist);
 
     init_connection_list(c);
+
+    save_ncp_options(c);
 
 #if defined(ENABLE_PKCS11)
     if (c->first_time)
@@ -807,7 +831,7 @@ init_static(void)
 #ifdef STATUS_PRINTF_TEST
     {
         struct gc_arena gc = gc_new();
-        const char *tmp_file = create_temp_file("/tmp", "foo", &gc);
+        const char *tmp_file = platform_create_temp_file("/tmp", "foo", &gc);
         struct status_output *so = status_open(tmp_file, 0, -1, NULL, STATUS_OUTPUT_WRITE);
         status_printf(so, "%s", "foo");
         status_printf(so, "%s", "bar");
@@ -981,7 +1005,7 @@ init_options_dev(struct options *options)
 {
     if (!options->dev && options->dev_node)
     {
-        char *dev_node = string_alloc(options->dev_node, NULL); /* POSIX basename() implementaions may modify its arguments */
+        char *dev_node = string_alloc(options->dev_node, NULL); /* POSIX basename() implementations may modify its arguments */
         options->dev = basename(dev_node);
     }
 }
@@ -1010,6 +1034,7 @@ print_openssl_info(const struct options *options)
         if (options->show_tls_ciphers)
         {
             show_available_tls_ciphers(options->cipher_list,
+                                       options->cipher_list_tls13,
                                        options->tls_cert_profile);
         }
         if (options->show_curves)
@@ -1027,6 +1052,11 @@ print_openssl_info(const struct options *options)
 bool
 do_genkey(const struct options *options)
 {
+    /* should we disable paging? */
+    if (options->mlock && (options->genkey || options->tls_crypt_v2_genkey_file))
+    {
+        platform_mlockall(true);
+    }
     if (options->genkey)
     {
         int nbits_written;
@@ -1034,17 +1064,39 @@ do_genkey(const struct options *options)
         notnull(options->shared_secret_file,
                 "shared secret output file (--secret)");
 
-        if (options->mlock)     /* should we disable paging? */
-        {
-            platform_mlockall(true);
-        }
-
         nbits_written = write_key_file(2, options->shared_secret_file);
+        if (nbits_written < 0)
+        {
+            msg(M_FATAL, "Failed to write key file");
+        }
 
         msg(D_GENKEY | M_NOPREFIX,
             "Randomly generated %d bit key written to %s", nbits_written,
             options->shared_secret_file);
         return true;
+    }
+    if (options->tls_crypt_v2_genkey_type)
+    {
+        if (!strcmp(options->tls_crypt_v2_genkey_type, "server"))
+        {
+            tls_crypt_v2_write_server_key_file(options->tls_crypt_v2_genkey_file);
+            return true;
+        }
+        if (options->tls_crypt_v2_genkey_type
+            && !strcmp(options->tls_crypt_v2_genkey_type, "client"))
+        {
+            if (!options->tls_crypt_v2_file)
+            {
+                msg(M_USAGE, "--tls-crypt-v2-genkey requires a server key to be set via --tls-crypt-v2 to create a client key");
+            }
+
+            tls_crypt_v2_write_client_key_file(options->tls_crypt_v2_genkey_file,
+                                               options->tls_crypt_v2_metadata, options->tls_crypt_v2_file,
+                                               options->tls_crypt_v2_inline);
+            return true;
+        }
+
+        msg(M_USAGE, "--tls-crypt-v2-genkey type should be \"client\" or \"server\"");
     }
     return false;
 }
@@ -1082,7 +1134,7 @@ do_persist_tuntap(const struct options *options)
              "options --mktun and --rmtun are not available on your operating "
              "system.  Please check 'man tun' (or 'tap'), whether your system "
              "supports using 'ifconfig %s create' / 'destroy' to create/remove "
-             "persistant tunnel interfaces.", options->dev );
+             "persistent tunnel interfaces.", options->dev );
 #endif
     }
     return false;
@@ -1414,12 +1466,10 @@ do_init_route_ipv6_list(const struct options *options,
     int metric = -1;            /* no metric set */
 
     gw = options->ifconfig_ipv6_remote;         /* default GW = remote end */
-#if 0                                   /* not yet done for IPv6 - TODO!*/
-    if (options->route_ipv6_default_gateway)            /* override? */
+    if (options->route_ipv6_default_gateway)
     {
         gw = options->route_ipv6_default_gateway;
     }
-#endif
 
     if (options->route_default_metric)
     {
@@ -1675,6 +1725,9 @@ do_open_tun(struct context *c)
     if (c->c1.tuntap)
     {
         oldtunfd = c->c1.tuntap->fd;
+        free(c->c1.tuntap);
+        c->c1.tuntap = NULL;
+        c->c1.tuntap_owned = false;
     }
 #endif
 
@@ -1847,8 +1900,11 @@ static void
 do_close_tun_simple(struct context *c)
 {
     msg(D_CLOSE, "Closing TUN/TAP interface");
-    close_tun(c->c1.tuntap);
-    c->c1.tuntap = NULL;
+    if (c->c1.tuntap)
+    {
+        close_tun(c->c1.tuntap);
+        c->c1.tuntap = NULL;
+    }
     c->c1.tuntap_owned = false;
 #if P2MP
     CLEAR(c->c1.pulled_options_digest_save);
@@ -2335,7 +2391,7 @@ socket_restart_pause(struct context *c)
     }
     c->persist.restart_sleep_seconds = 0;
 
-    /* do managment hold on context restart, i.e. second, third, fourth, etc. initialization */
+    /* do management hold on context restart, i.e. second, third, fourth, etc. initialization */
     if (do_hold(sec))
     {
         sec = 0;
@@ -2406,7 +2462,7 @@ key_schedule_free(struct key_schedule *ks, bool free_ssl_ctx)
     if (tls_ctx_initialised(&ks->ssl_ctx) && free_ssl_ctx)
     {
         tls_ctx_free(&ks->ssl_ctx);
-        free_key_ctx_bi(&ks->tls_wrap_key);
+        free_key_ctx(&ks->tls_crypt_v2_server_key);
     }
     CLEAR(*ks);
 }
@@ -2497,6 +2553,68 @@ do_init_crypto_static(struct context *c, const unsigned int flags)
 }
 
 /*
+ * Initialize the tls-auth/crypt key context
+ */
+static void
+do_init_tls_wrap_key(struct context *c)
+{
+    const struct options *options = &c->options;
+
+    /* TLS handshake authentication (--tls-auth) */
+    if (options->ce.tls_auth_file)
+    {
+        /* Initialize key_type for tls-auth with auth only */
+        CLEAR(c->c1.ks.tls_auth_key_type);
+        if (!streq(options->authname, "none"))
+        {
+            c->c1.ks.tls_auth_key_type.digest = md_kt_get(options->authname);
+            c->c1.ks.tls_auth_key_type.hmac_length =
+                md_kt_size(c->c1.ks.tls_auth_key_type.digest);
+        }
+        else
+        {
+            msg(M_FATAL, "ERROR: tls-auth enabled, but no valid --auth "
+                "algorithm specified ('%s')", options->authname);
+        }
+
+        crypto_read_openvpn_key(&c->c1.ks.tls_auth_key_type,
+                                &c->c1.ks.tls_wrap_key,
+                                options->ce.tls_auth_file,
+                                options->ce.tls_auth_file_inline,
+                                options->ce.key_direction,
+                                "Control Channel Authentication", "tls-auth");
+    }
+
+    /* TLS handshake encryption+authentication (--tls-crypt) */
+    if (options->ce.tls_crypt_file)
+    {
+        tls_crypt_init_key(&c->c1.ks.tls_wrap_key,
+                           options->ce.tls_crypt_file,
+                           options->ce.tls_crypt_inline, options->tls_server);
+    }
+
+    /* tls-crypt with client-specific keys (--tls-crypt-v2) */
+    if (options->ce.tls_crypt_v2_file)
+    {
+        if (options->tls_server)
+        {
+            tls_crypt_v2_init_server_key(&c->c1.ks.tls_crypt_v2_server_key,
+                                         true, options->ce.tls_crypt_v2_file,
+                                         options->ce.tls_crypt_v2_inline);
+        }
+        else
+        {
+            tls_crypt_v2_init_client_key(&c->c1.ks.tls_wrap_key,
+                                         &c->c1.ks.tls_crypt_v2_wkc,
+                                         options->ce.tls_crypt_v2_file,
+                                         options->ce.tls_crypt_v2_inline);
+        }
+    }
+
+
+}
+
+/*
  * Initialize the persistent component of OpenVPN's TLS mode,
  * which is preserved across SIGUSR1 resets.
  */
@@ -2535,7 +2653,7 @@ do_init_crypto_tls_c1(struct context *c)
             return;
 #else  /* if P2MP */
             msg(M_FATAL, "Error: private key password verification failed");
-#endif
+#endif /* if P2MP */
         }
 
         /* Get cipher & hash algorithms */
@@ -2545,39 +2663,8 @@ do_init_crypto_tls_c1(struct context *c)
         /* Initialize PRNG with config-specified digest */
         prng_init(options->prng_hash, options->prng_nonce_secret_len);
 
-        /* TLS handshake authentication (--tls-auth) */
-        if (options->tls_auth_file)
-        {
-            /* Initialize key_type for tls-auth with auth only */
-            CLEAR(c->c1.ks.tls_auth_key_type);
-            if (!streq(options->authname, "none"))
-            {
-                c->c1.ks.tls_auth_key_type.digest = md_kt_get(options->authname);
-                c->c1.ks.tls_auth_key_type.hmac_length =
-                    md_kt_size(c->c1.ks.tls_auth_key_type.digest);
-            }
-            else
-            {
-                msg(M_FATAL, "ERROR: tls-auth enabled, but no valid --auth "
-                    "algorithm specified ('%s')", options->authname);
-            }
-
-            crypto_read_openvpn_key(&c->c1.ks.tls_auth_key_type,
-                                    &c->c1.ks.tls_wrap_key, options->tls_auth_file,
-                                    options->tls_auth_file_inline, options->key_direction,
-                                    "Control Channel Authentication", "tls-auth");
-        }
-
-        /* TLS handshake encryption+authentication (--tls-crypt) */
-        if (options->tls_crypt_file)
-        {
-            tls_crypt_init_key(&c->c1.ks.tls_wrap_key, options->tls_crypt_file,
-                               options->tls_crypt_inline, options->tls_server);
-        }
-
-        c->c1.ciphername = options->ciphername;
-        c->c1.authname = options->authname;
-        c->c1.keysize = options->keysize;
+        /* initialize tls-auth/crypt/crypt-v2 key */
+        do_init_tls_wrap_key(c);
 
 #if 0 /* was: #if ENABLE_INLINE_FILES --  Note that enabling this code will break restarts */
         if (options->priv_key_file_inline)
@@ -2591,10 +2678,11 @@ do_init_crypto_tls_c1(struct context *c)
     {
         msg(D_INIT_MEDIUM, "Re-using SSL/TLS context");
 
-        /* Restore pre-NCP cipher options */
-        c->options.ciphername = c->c1.ciphername;
-        c->options.authname = c->c1.authname;
-        c->options.keysize = c->c1.keysize;
+        /*
+         * tls-auth/crypt key can be configured per connection block, therefore
+         * we must reload it as it may have changed
+         */
+        do_init_tls_wrap_key(c);
     }
 }
 
@@ -2673,15 +2761,15 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
     {
         /* Add 10% jitter to reneg-sec by default (server side only) */
         int auto_jitter = options->mode != MODE_SERVER ? 0 :
-                get_random() % max_int(options->renegotiate_seconds / 10, 1);
+                          get_random() % max_int(options->renegotiate_seconds / 10, 1);
         to.renegotiate_seconds = options->renegotiate_seconds - auto_jitter;
     }
     else
     {
         /* Add user-specified jitter to reneg-sec */
-        to.renegotiate_seconds = options->renegotiate_seconds -
-                (get_random() % max_int(options->renegotiate_seconds
-                                        - options->renegotiate_seconds_min, 1));
+        to.renegotiate_seconds = options->renegotiate_seconds
+                                 -(get_random() % max_int(options->renegotiate_seconds
+                                                          - options->renegotiate_seconds_min, 1));
     }
     to.single_session = options->single_session;
     to.mode = options->mode;
@@ -2755,7 +2843,7 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
     to.x509_track = options->x509_track;
 
 #if P2MP
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
     to.sci = &options->sc_info;
 #endif
 #endif
@@ -2783,7 +2871,7 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
 #endif
 
     /* TLS handshake authentication (--tls-auth) */
-    if (options->tls_auth_file)
+    if (options->ce.tls_auth_file)
     {
         to.tls_wrap.mode = TLS_WRAP_AUTH;
         to.tls_wrap.opt.key_ctx_bi = c->c1.ks.tls_wrap_key;
@@ -2794,13 +2882,29 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
     }
 
     /* TLS handshake encryption (--tls-crypt) */
-    if (options->tls_crypt_file)
+    if (options->ce.tls_crypt_file
+        || (options->ce.tls_crypt_v2_file && options->tls_client))
     {
         to.tls_wrap.mode = TLS_WRAP_CRYPT;
         to.tls_wrap.opt.key_ctx_bi = c->c1.ks.tls_wrap_key;
         to.tls_wrap.opt.pid_persist = &c->c1.pid_persist;
         to.tls_wrap.opt.flags |= CO_PACKET_ID_LONG_FORM;
         tls_crypt_adjust_frame_parameters(&to.frame);
+
+        if (options->ce.tls_crypt_v2_file)
+        {
+            to.tls_wrap.tls_crypt_v2_wkc = &c->c1.ks.tls_crypt_v2_wkc;
+        }
+    }
+
+    if (options->ce.tls_crypt_v2_file)
+    {
+        to.tls_crypt_v2 = true;
+        if (options->tls_server)
+        {
+            to.tls_wrap.tls_crypt_v2_server_key = c->c1.ks.tls_crypt_v2_server_key;
+            to.tls_crypt_v2_verify_script = c->options.tls_crypt_v2_verify_script;
+        }
     }
 
     /* If we are running over TCP, allow for
@@ -2962,7 +3066,7 @@ do_init_frame(struct context *c)
     /* packets with peer-id (P_DATA_V2) need 3 extra bytes in frame (on client)
      * and need link_mtu+3 bytes on socket reception (on server).
      *
-     * accomodate receive path in f->extra_link, which has the side effect of
+     * accommodate receive path in f->extra_link, which has the side effect of
      * also increasing send buffers (BUF_SIZE() macro), which need to be
      * allocated big enough before receiving peer-id option from server.
      *
@@ -3089,14 +3193,14 @@ do_option_warnings(struct context *c)
         msg(M_WARN, "WARNING: --ns-cert-type is DEPRECATED.  Use --remote-cert-tls instead.");
     }
 
-    /* If a script is used, print appropiate warnings */
+    /* If a script is used, print appropriate warnings */
     if (o->user_script_used)
     {
-        if (script_security >= SSEC_SCRIPTS)
+        if (script_security() >= SSEC_SCRIPTS)
         {
             msg(M_WARN, "NOTE: the current --script-security setting may allow this configuration to call user-defined scripts");
         }
-        else if (script_security >= SSEC_PW_ENV)
+        else if (script_security() >= SSEC_PW_ENV)
         {
             msg(M_WARN, "WARNING: the current --script-security setting may allow passwords to be passed to scripts via environmental variables");
         }
@@ -3398,6 +3502,15 @@ do_close_tls(struct context *c)
 static void
 do_close_free_key_schedule(struct context *c, bool free_ssl_ctx)
 {
+    /*
+     * always free the tls_auth/crypt key. If persist_key is true, the key will
+     * be reloaded from memory (pre-cached)
+     */
+    free_key_ctx_bi(&c->c1.ks.tls_wrap_key);
+    CLEAR(c->c1.ks.tls_wrap_key);
+    buf_clear(&c->c1.ks.tls_crypt_v2_wkc);
+    free_buf(&c->c1.ks.tls_crypt_v2_wkc);
+
     if (!(c->sig->signal_received == SIGUSR1 && c->options.persist_key))
     {
         key_schedule_free(&c->c1.ks, free_ssl_ctx);
@@ -3449,7 +3562,7 @@ do_close_link_socket(struct context *c)
 }
 
 /*
- * Close packet-id persistance file
+ * Close packet-id persistence file
  */
 static void
 do_close_packet_id(struct context *c)
@@ -3544,7 +3657,7 @@ do_close_status_output(struct context *c)
 }
 
 /*
- * Handle ifconfig-pool persistance object.
+ * Handle ifconfig-pool persistence object.
  */
 static void
 do_open_ifconfig_pool_persist(struct context *c)
@@ -4156,7 +4269,7 @@ init_instance(struct context *c, const struct env_set *env, const unsigned int f
         do_init_traffic_shaper(c);
     }
 
-    /* do one-time inits, and possibily become a daemon here */
+    /* do one-time inits, and possibly become a daemon here */
     do_init_first_time(c);
 
 #ifdef ENABLE_PLUGIN
@@ -4262,6 +4375,8 @@ close_instance(struct context *c)
         /* free key schedules */
         do_close_free_key_schedule(c, (c->mode == CM_P2P || c->mode == CM_TOP));
 
+        restore_ncp_options(c);
+
         /* close TCP/UDP connection */
         do_close_link_socket(c);
 
@@ -4284,7 +4399,7 @@ close_instance(struct context *c)
         do_close_plugins(c);
 #endif
 
-        /* close packet-id persistance file */
+        /* close packet-id persistence file */
         do_close_packet_id(c);
 
         /* close --status file */
@@ -4330,6 +4445,7 @@ inherit_context_child(struct context *dest,
     dest->c1.ks.ssl_ctx = src->c1.ks.ssl_ctx;
     dest->c1.ks.tls_wrap_key = src->c1.ks.tls_wrap_key;
     dest->c1.ks.tls_auth_key_type = src->c1.ks.tls_auth_key_type;
+    dest->c1.ks.tls_crypt_v2_server_key = src->c1.ks.tls_crypt_v2_server_key;
     /* inherit pre-NCP ciphers */
     dest->c1.ciphername = src->c1.ciphername;
     dest->c1.authname = src->c1.authname;

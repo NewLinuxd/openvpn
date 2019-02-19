@@ -244,7 +244,7 @@ AC_ARG_ENABLE(
 
 AC_ARG_ENABLE(
 	[systemd],
-	[AS_HELP_STRING([--enable-systemd], [enable systemd suppport @<:@default=no@:>@])],
+	[AS_HELP_STRING([--enable-systemd], [enable systemd support @<:@default=no@:>@])],
 	,
 	[enable_systemd="no"]
 )
@@ -918,6 +918,7 @@ if test "${with_crypto_library}" = "openssl"; then
 			EVP_MD_CTX_new \
 			EVP_MD_CTX_free \
 			EVP_MD_CTX_reset \
+			OpenSSL_version \
 			SSL_CTX_get_default_passwd_cb \
 			SSL_CTX_get_default_passwd_cb_userdata \
 			SSL_CTX_set_security_level \
@@ -942,6 +943,7 @@ if test "${with_crypto_library}" = "openssl"; then
 			RSA_meth_set_priv_enc \
 			RSA_meth_set_priv_dec \
 			RSA_meth_set_init \
+			RSA_meth_set_sign \
 			RSA_meth_set_finish \
 			RSA_meth_set0_app_data \
 			RSA_meth_get0_app_data \
@@ -992,35 +994,6 @@ elif test "${with_crypto_library}" = "mbedtls"; then
 		[AC_MSG_RESULT([ok])],
 		[AC_MSG_ERROR([mbed TLS 2.y.z required])]
 	)
-
-	mbedtls_with_pkcs11="no"
-	AC_COMPILE_IFELSE(
-		[AC_LANG_PROGRAM(
-			[[
-#include <mbedtls/config.h>
-			]],
-			[[
-#ifndef MBEDTLS_PKCS11_C
-#error pkcs11 wrapper missing
-#endif
-			]]
-		)],
-		mbedtls_with_pkcs11="yes")
-
-	AC_MSG_CHECKING([mbedtls pkcs11 support])
-	if test "${enable_pkcs11}" = "yes"; then
-		if test "${mbedtls_with_pkcs11}" = "yes"; then
-			AC_MSG_RESULT([ok])
-		else
-			AC_MSG_ERROR([mbedtls has no pkcs11 wrapper compiled in])
-		fi
-	else
-		if test "${mbedtls_with_pkcs11}" != "yes"; then
-			AC_MSG_RESULT([ok])
-		else
-			AC_MSG_ERROR([mbed TLS compiled with PKCS11, while OpenVPN is not])
-		fi
-	fi
 
 	have_crypto_aead_modes="yes"
 	AC_CHECK_FUNCS(
@@ -1292,13 +1265,25 @@ if test "${enable_pkcs11}" = "yes"; then
 	)
 fi
 
+AC_DEFUN([ACL_CHECK_ADD_COMPILE_FLAGS], [
+    old_cflags="$CFLAGS"
+    CFLAGS="$1 $CFLAGS"
+    AC_MSG_CHECKING([whether the compiler acceppts $1])
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [AC_MSG_RESULT([yes])],
+        [AC_MSG_RESULT([no]); CFLAGS="$old_cflags"])]
+)
+
+ACL_CHECK_ADD_COMPILE_FLAGS([-Wno-unused-function])
+ACL_CHECK_ADD_COMPILE_FLAGS([-Wno-unused-parameter])
+ACL_CHECK_ADD_COMPILE_FLAGS([-Wall])
+
 if test "${enable_pedantic}" = "yes"; then
 	enable_strict="yes"
 	CFLAGS="${CFLAGS} -pedantic"
 	AC_DEFINE([PEDANTIC], [1], [Enable pedantic mode])
 fi
 if test "${enable_strict}" = "yes"; then
-	CFLAGS="${CFLAGS} -Wall -Wno-unused-parameter -Wno-unused-function"
+	CFLAGS="${CFLAGS} -Wsign-compare -Wuninitialized"
 fi
 if test "${enable_werror}" = "yes"; then
 	CFLAGS="${CFLAGS} -Werror"
@@ -1375,8 +1360,8 @@ AC_SUBST([VENDOR_SRC_ROOT])
 AC_SUBST([VENDOR_BUILD_ROOT])
 AC_SUBST([VENDOR_DIST_ROOT])
 
-TEST_LDFLAGS="-lcmocka -L\$(abs_top_builddir)/vendor/dist/lib -Wl,-rpath,\$(abs_top_builddir)/vendor/dist/lib"
-TEST_CFLAGS="-I\$(top_srcdir)/include -I\$(abs_top_builddir)/vendor/dist/include"
+TEST_LDFLAGS="${OPTIONAL_CRYPTO_LIBS} ${OPTIONAL_PKCS11_LIBS} -lcmocka -L\$(abs_top_builddir)/vendor/dist/lib -Wl,-rpath,\$(abs_top_builddir)/vendor/dist/lib"
+TEST_CFLAGS="${OPTIONAL_CRYPTO_CFLAGS} ${OPTIONAL_PKCS11_CFLAGS} -I\$(top_srcdir)/include -I\$(abs_top_builddir)/vendor/dist/include"
 
 AC_SUBST([TEST_LDFLAGS])
 AC_SUBST([TEST_CFLAGS])
@@ -1414,10 +1399,12 @@ AC_CONFIG_FILES([
 	src/Makefile
 	src/compat/Makefile
 	src/openvpn/Makefile
+	src/openvpnmsica/Makefile
 	src/openvpnserv/Makefile
 	src/plugins/Makefile
 	src/plugins/auth-pam/Makefile
 	src/plugins/down-root/Makefile
+	src/tapctl/Makefile
 	tests/Makefile
         tests/unit_tests/Makefile
         tests/unit_tests/example_test/Makefile

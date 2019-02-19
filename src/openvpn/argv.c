@@ -37,6 +37,7 @@
 
 #include "argv.h"
 #include "integer.h"
+#include "env_set.h"
 #include "options.h"
 
 static void
@@ -248,6 +249,13 @@ argv_printf_arglist(struct argv *a, const char *format, va_list arglist)
             {
                 char numstr[64];
                 openvpn_snprintf(numstr, sizeof(numstr), "%u", va_arg(arglist, unsigned int));
+                argv_append(a, string_alloc(numstr, NULL));
+            }
+            else if (!strcmp(term, "%lu"))
+            {
+                char numstr[64];
+                openvpn_snprintf(numstr, sizeof(numstr), "%lu",
+                                 va_arg(arglist, unsigned long));
                 argv_append(a, string_alloc(numstr, NULL));
             }
             else if (!strcmp(term, "%s/%d"))

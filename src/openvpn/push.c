@@ -55,8 +55,20 @@ receive_auth_failed(struct context *c, const struct buffer *buffer)
 
     if (c->options.pull)
     {
-        switch (auth_retry_get())
+        /* Before checking how to react on AUTH_FAILED, first check if the
+         * failed auth might be the result of an expired auth-token.
+         * Note that a server restart will trigger a generic AUTH_FAILED
+         * instead an AUTH_FAILED,SESSION so handle all AUTH_FAILED message
+         * identical for this scenario */
+        if (ssl_clean_auth_token())
         {
+            c->sig->signal_received = SIGUSR1; /* SOFT-SIGUSR1 -- Auth failure error */
+            c->sig->signal_text = "auth-failure (auth-token)";
+        }
+        else
+        {
+            switch (auth_retry_get())
+            {
             case AR_NONE:
                 c->sig->signal_received = SIGTERM; /* SOFT-SIGTERM -- Auth failure error */
                 break;
@@ -70,8 +82,9 @@ receive_auth_failed(struct context *c, const struct buffer *buffer)
 
             default:
                 ASSERT(0);
+            }
+            c->sig->signal_text = "auth-failure";
         }
-        c->sig->signal_text = "auth-failure";
 #ifdef ENABLE_MANAGEMENT
         if (management)
         {
@@ -88,7 +101,7 @@ receive_auth_failed(struct context *c, const struct buffer *buffer)
          * Save the dynamic-challenge text even when management is defined
          */
         {
-#ifdef ENABLE_CLIENT_CR
+#ifdef ENABLE_MANAGEMENT
             struct buffer buf = *buffer;
             if (buf_string_match_head_str(&buf, "AUTH_FAILED,CRV1:") && BLEN(&buf))
             {
@@ -342,7 +355,8 @@ prepare_push_reply(struct context *c, struct gc_arena *gc,
 
     /* ipv4 */
     if (c->c2.push_ifconfig_defined && c->c2.push_ifconfig_local
-        && c->c2.push_ifconfig_remote_netmask)
+        && c->c2.push_ifconfig_remote_netmask
+        && !o->push_ifconfig_ipv4_blocked)
     {
         in_addr_t ifconfig_local = c->c2.push_ifconfig_local;
         if (c->c2.push_ifconfig_local_alias)
@@ -601,6 +615,13 @@ void
 push_remove_option(struct options *o, const char *p)
 {
     msg(D_PUSH_DEBUG, "PUSH_REMOVE searching for: '%s'", p);
+
+    /* ifconfig is special, as not part of the push list */
+    if (streq(p, "ifconfig"))
+    {
+        o->push_ifconfig_ipv4_blocked = true;
+        return;
+    }
 
     /* ifconfig-ipv6 is special, as not part of the push list */
     if (streq( p, "ifconfig-ipv6" ))
