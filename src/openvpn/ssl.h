@@ -431,6 +431,8 @@ void ssl_purge_auth(const bool auth_user_pass_only);
 
 void ssl_set_auth_token(const char *token);
 
+bool ssl_clean_auth_token(void);
+
 #ifdef ENABLE_MANAGEMENT
 /*
  * ssl_get_auth_challenge will parse the server-pushed auth-failed
@@ -438,8 +440,6 @@ void ssl_set_auth_token(const char *token);
  * auth_challenge_info struct.
  */
 void ssl_purge_auth_challenge(void);
-
-bool ssl_clean_auth_token(void);
 
 void ssl_put_auth_challenge(const char *cr_str);
 
@@ -476,15 +476,18 @@ void tls_update_remote_addr(struct tls_multi *multi,
  * Update TLS session crypto parameters (cipher and auth) and derive data
  * channel keys based on the supplied options.
  *
- * @param session       The TLS session to update.
- * @param options       The options to use when updating session.
- * @param frame         The frame options for this session (frame overhead is
- *                      adjusted based on the selected cipher/auth).
+ * @param session         The TLS session to update.
+ * @param options         The options to use when updating session.
+ * @param frame           The frame options for this session (frame overhead is
+ *                        adjusted based on the selected cipher/auth).
+ * @param frame_fragment  The fragment frame options.
  *
  * @return true if updating succeeded, false otherwise.
  */
 bool tls_session_update_crypto_params(struct tls_session *session,
-                                      struct options *options, struct frame *frame);
+                                      struct options *options,
+                                      struct frame *frame,
+                                      struct frame *frame_fragment);
 
 /**
  * "Poor man's NCP": Use peer cipher if it is an allowed (NCP) cipher.

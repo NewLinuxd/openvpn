@@ -294,15 +294,19 @@ else
 fi
 
 AC_DEFINE_UNQUOTED([TARGET_ALIAS], ["${host}"], [A string representing our host])
+AM_CONDITIONAL([TARGET_LINUX], [false])
 case "$host" in
 	*-*-linux*)
 		AC_DEFINE([TARGET_LINUX], [1], [Are we running on Linux?])
+		AM_CONDITIONAL([TARGET_LINUX], [true])
 		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["L"], [Target prefix])
+		have_sitnl="yes"
 		;;
 	*-*-solaris*)
 		AC_DEFINE([TARGET_SOLARIS], [1], [Are we running on Solaris?])
 		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["S"], [Target prefix])
 		CPPFLAGS="$CPPFLAGS -D_XPG4_2"
+		test -x /bin/bash && SHELL="/bin/bash"
 		;;
 	*-*-openbsd*)
 		AC_DEFINE([TARGET_OPENBSD], [1], [Are we running on OpenBSD?])
@@ -320,8 +324,6 @@ case "$host" in
 		AC_DEFINE([TARGET_DARWIN], [1], [Are we running on Mac OS X?])
 		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["M"], [Target prefix])
 		have_tap_header="yes"
-		dnl some Mac OS X tendering (we use vararg macros...)
-		CPPFLAGS="$CPPFLAGS -no-cpp-precomp"
 		ac_cv_type_struct_in_pktinfo=no
 		;;
 	*-mingw*)
@@ -436,7 +438,7 @@ AC_CHECK_HEADERS([ \
 	unistd.h signal.h libgen.h stropts.h \
 	syslog.h pwd.h grp.h \
 	sys/sockio.h sys/uio.h linux/sockios.h \
-	linux/types.h sys/poll.h sys/epoll.h err.h \
+	linux/types.h poll.h sys/epoll.h err.h \
 ])
 
 SOCKET_INCLUDES="
@@ -918,10 +920,13 @@ if test "${with_crypto_library}" = "openssl"; then
 			EVP_MD_CTX_new \
 			EVP_MD_CTX_free \
 			EVP_MD_CTX_reset \
+			EVP_CIPHER_CTX_reset \
 			OpenSSL_version \
 			SSL_CTX_get_default_passwd_cb \
 			SSL_CTX_get_default_passwd_cb_userdata \
 			SSL_CTX_set_security_level \
+			X509_get0_notBefore \
+			X509_get0_notAfter \
 			X509_get0_pubkey \
 			X509_STORE_get0_objects \
 			X509_OBJECT_free \
@@ -1223,14 +1228,19 @@ else
 	enable_plugin_down_root="no"
 fi
 
+AM_CONDITIONAL([HAVE_SITNL], [false])
+
 if test "${enable_iproute2}" = "yes"; then
 	test -z "${IPROUTE}" && AC_MSG_ERROR([ip utility is required but missing])
 	AC_DEFINE([ENABLE_IPROUTE], [1], [enable iproute2 support])
-else
-	if test "${WIN32}" != "yes"; then
-		test -z "${ROUTE}" && AC_MSG_ERROR([route utility is required but missing])
-		test -z "${IFCONFIG}" && AC_MSG_ERROR([ifconfig utility is required but missing])
-	fi
+else if test "${have_sitnl}" = "yes"; then
+	AC_DEFINE([ENABLE_SITNL], [1], [enable sitnl support])
+	AM_CONDITIONAL([HAVE_SITNL], [true])
+else if test "${WIN32}" != "yes" -a "${have_sitnl}" != "yes"; then
+	test -z "${ROUTE}" && AC_MSG_ERROR([route utility is required but missing])
+	test -z "${IFCONFIG}" && AC_MSG_ERROR([ifconfig utility is required but missing])
+fi
+fi
 fi
 
 if test "${enable_selinux}" = "yes"; then
@@ -1265,14 +1275,18 @@ if test "${enable_pkcs11}" = "yes"; then
 	)
 fi
 
+# When testing a compiler option, we add -Werror to force
+# an error when the option is unsupported. This is not
+# required for gcc, but some compilers such as clang needs it.
 AC_DEFUN([ACL_CHECK_ADD_COMPILE_FLAGS], [
     old_cflags="$CFLAGS"
-    CFLAGS="$1 $CFLAGS"
-    AC_MSG_CHECKING([whether the compiler acceppts $1])
-    AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [AC_MSG_RESULT([yes])],
+    CFLAGS="$1 -Werror $CFLAGS"
+    AC_MSG_CHECKING([whether the compiler accepts $1])
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [AC_MSG_RESULT([yes])]; CFLAGS="$1 $old_cflags",
         [AC_MSG_RESULT([no]); CFLAGS="$old_cflags"])]
 )
 
+ACL_CHECK_ADD_COMPILE_FLAGS([-Wno-stringop-truncation])
 ACL_CHECK_ADD_COMPILE_FLAGS([-Wno-unused-function])
 ACL_CHECK_ADD_COMPILE_FLAGS([-Wno-unused-parameter])
 ACL_CHECK_ADD_COMPILE_FLAGS([-Wall])
@@ -1353,34 +1367,31 @@ AC_SUBST([sampledir])
 AC_SUBST([systemdunitdir])
 AC_SUBST([tmpfilesdir])
 
-VENDOR_SRC_ROOT="\$(abs_top_srcdir)/vendor/"
-VENDOR_DIST_ROOT="\$(abs_top_builddir)/vendor/dist"
-VENDOR_BUILD_ROOT="\$(abs_top_builddir)/vendor/.build"
-AC_SUBST([VENDOR_SRC_ROOT])
-AC_SUBST([VENDOR_BUILD_ROOT])
-AC_SUBST([VENDOR_DIST_ROOT])
+AC_ARG_ENABLE(
+     [unit-tests],
+     [AS_HELP_STRING([--disable-unit-tests],
+                     [Disables building and running the unit tests suite])],
+     [],
+     [enable_unit_tests="yes"]
+)
 
-TEST_LDFLAGS="${OPTIONAL_CRYPTO_LIBS} ${OPTIONAL_PKCS11_LIBS} -lcmocka -L\$(abs_top_builddir)/vendor/dist/lib -Wl,-rpath,\$(abs_top_builddir)/vendor/dist/lib"
-TEST_CFLAGS="${OPTIONAL_CRYPTO_CFLAGS} ${OPTIONAL_PKCS11_CFLAGS} -I\$(top_srcdir)/include -I\$(abs_top_builddir)/vendor/dist/include"
+# Check if cmocka is available - needed for unit testing
+PKG_CHECK_MODULES(
+	[CMOCKA], [cmocka],
+	[have_cmocka="yes"],
+	[AC_MSG_WARN([cmocka.pc not found on the system.  Unit tests disabled])]
+)
+AM_CONDITIONAL([ENABLE_UNITTESTS], [test "${enable_unit_tests}" = "yes" -a "${have_cmocka}" = "yes" ])
+AC_SUBST([ENABLE_UNITTESTS])
+
+TEST_LDFLAGS="${OPTIONAL_CRYPTO_LIBS} ${OPTIONAL_PKCS11_HELPER_LIBS}"
+TEST_LDFLAGS="${TEST_LDFLAGS} ${OPTIONAL_LZO_LIBS} ${CMOCKA_LIBS}"
+TEST_CFLAGS="${OPTIONAL_CRYPTO_CFLAGS} ${OPTIONAL_PKCS11_HELPER_CFLAGS}"
+TEST_CFLAGS="${TEST_CFLAGS} ${OPTIONAL_LZO_CFLAGS}"
+TEST_CFLAGS="${TEST_CFLAGS} -I\$(top_srcdir)/include ${CMOCKA_CFLAGS}"
 
 AC_SUBST([TEST_LDFLAGS])
 AC_SUBST([TEST_CFLAGS])
-
-# Check if cmake is available and cmocka git submodule is initialized,
-# needed for unit testing
-AC_CHECK_PROGS([CMAKE], [cmake])
-if test -n "${CMAKE}"; then
-   if test -f "${srcdir}/vendor/cmocka/CMakeLists.txt"; then
-      AM_CONDITIONAL([CMOCKA_INITIALIZED], [true])
-   else
-      AM_CONDITIONAL([CMOCKA_INITIALIZED], [false])
-      AC_MSG_RESULT([!! WARNING !! The cmoka git submodule has not been initialized or updated.  Unit testing cannot be performed.])
-   fi
-else
-   AC_MSG_RESULT([!! WARNING !! CMake is NOT available.  Unit testing cannot be performed.])
-   AM_CONDITIONAL([CMOCKA_INITIALIZED], [false])
-fi
-
 
 AC_CONFIG_FILES([
 	version.sh
@@ -1389,8 +1400,6 @@ AC_CONFIG_FILES([
 	build/msvc/Makefile
 	build/msvc/msvc-generate/Makefile
 	distro/Makefile
-	distro/rpm/Makefile
-	distro/rpm/openvpn.spec
 	distro/systemd/Makefile
 	doc/Makefile
 	doc/doxygen/Makefile
@@ -1411,7 +1420,6 @@ AC_CONFIG_FILES([
         tests/unit_tests/openvpn/Makefile
         tests/unit_tests/plugins/Makefile
         tests/unit_tests/plugins/auth-pam/Makefile
-        vendor/Makefile
 	sample/Makefile
 ])
 AC_CONFIG_FILES([tests/t_client.sh], [chmod +x tests/t_client.sh])

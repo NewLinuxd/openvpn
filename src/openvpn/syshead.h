@@ -39,6 +39,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <winsock2.h>
+#include <tlhelp32.h>
 #define sleep(x) Sleep((x)*1000)
 #define random rand
 #define srandom srand
@@ -179,8 +180,8 @@
 #include <resolv.h>
 #endif
 
-#ifdef HAVE_SYS_POLL_H
-#include <sys/poll.h>
+#ifdef HAVE_POLL_H
+#include <poll.h>
 #endif
 
 #ifdef HAVE_SYS_EPOLL_H
@@ -600,7 +601,7 @@ socket_defined(const socket_descriptor_t sd)
 /*
  * Is poll available on this platform?
  */
-#if defined(HAVE_POLL) && defined(HAVE_SYS_POLL_H)
+#if defined(HAVE_POLL) && defined(HAVE_POLL_H)
 #define POLL 1
 #else
 #define POLL 0

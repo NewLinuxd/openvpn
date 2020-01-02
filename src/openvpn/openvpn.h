@@ -68,6 +68,7 @@ struct key_schedule
     struct key_ctx_bi tls_wrap_key;
     struct key_ctx tls_crypt_v2_server_key;
     struct buffer tls_crypt_v2_wkc;             /**< Wrapped client key */
+    struct key_ctx auth_token_key;
 };
 
 /*
@@ -265,6 +266,7 @@ struct context_2
     /* Object to handle advanced MTU negotiation and datagram fragmentation */
     struct fragment_master *fragment;
     struct frame frame_fragment;
+    struct frame frame_fragment_initial;
     struct frame frame_fragment_omit;
 #endif
 
@@ -521,6 +523,8 @@ struct context
                                  *   context structure. */
 
     struct env_set *es;         /**< Set of environment variables. */
+
+    openvpn_net_ctx_t net_ctx;	/**< Networking API opaque context */
 
     struct signal_info *sig;    /**< Internal error signaling object. */
 

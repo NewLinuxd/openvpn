@@ -199,7 +199,7 @@ openvpn_main(int argc, char *argv[])
 
 #ifdef ENABLE_MANAGEMENT
             /* initialize management subsystem */
-            init_management(&c);
+            init_management();
 #endif
 
             /* initialize options to default state */
@@ -214,6 +214,8 @@ openvpn_main(int argc, char *argv[])
             init_plugins(&c);
             open_plugins(&c, true, OPENVPN_PLUGIN_INIT_PRE_CONFIG_PARSE);
 #endif
+
+            net_ctx_init(&c, &c.net_ctx);
 
             /* init verbosity and mute levels */
             init_verb_mute(&c, IVM_LEVEL_1);
@@ -234,7 +236,7 @@ openvpn_main(int argc, char *argv[])
             }
 
             /* tun/tap persist command? */
-            if (do_persist_tuntap(&c.options))
+            if (do_persist_tuntap(&c.options, &c.net_ctx))
             {
                 break;
             }
@@ -330,6 +332,7 @@ openvpn_main(int argc, char *argv[])
             env_set_destroy(c.es);
             uninit_options(&c.options);
             gc_reset(&c.gc);
+            net_ctx_free(&c.net_ctx);
         }
         while (c.sig->signal_received == SIGHUP);
     }

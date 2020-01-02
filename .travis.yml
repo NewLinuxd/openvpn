@@ -1,5 +1,5 @@
 sudo: required
-dist: trusty
+dist: xenial
 
 os: linux
 
@@ -9,13 +9,13 @@ env:
   global:
     - JOBS=3
     - PREFIX="${HOME}/opt"
-    - TAP_WINDOWS_VERSION=9.21.2
+    - TAP_WINDOWS_VERSION=9.23.3
     - LZO_VERSION=2.10
-    - PKCS11_HELPER_VERSION=1.22
-    - MBEDTLS_VERSION="2.8.0"
+    - PKCS11_HELPER_VERSION=1.25.1
+    - MBEDTLS_VERSION=2.16.1
     - MBEDTLS_CFLAGS="-I${PREFIX}/include"
     - MBEDTLS_LIBS="-L${PREFIX}/lib -lmbedtls -lmbedx509 -lmbedcrypto"
-    - OPENSSL_VERSION="1.0.2o"
+    - OPENSSL_VERSION=1.0.2s
     - OPENSSL_CFLAGS="-I${PREFIX}/include"
     - OPENSSL_LIBS="-L${PREFIX}/lib -lssl -lcrypto"
     # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
@@ -24,60 +24,73 @@ env:
 
 matrix:
   include:
+    - env:
+      - SSLLIB="openssl"
+      - OPENSSL_VERSION="1.1.1d"
+      - P7Z="c:\Program Files\7-Zip\7z.exe"
+      - CC="cl"
+      os: windows
+      compiler: cl
     - env: SSLLIB="openssl" RUN_COVERITY="1"
       os: linux
       compiler: gcc
     - env: SSLLIB="openssl" OPENSSL_VERSION="1.0.1u"
       os: linux
       compiler: gcc
-    - env: SSLLIB="openssl" OPENSSL_VERSION="1.1.0h"
+    - env: SSLLIB="openssl" OPENSSL_VERSION="1.1.1c"
       os: linux
       compiler: gcc
-    - env: SSLLIB="openssl" CFLAGS="-fsanitize=address"
+    - env: SSLLIB="openssl" OPENSSL_VERSION="1.1.1c" LABEL="linux-ppc64le"
+      os: linux-ppc64le
+      compiler: gcc
+    - env: SSLLIB="openssl" EXTRA_CONFIG="--enable-iproute2"
+      os: linux
+      compiler: gcc
+    - env: SSLLIB="openssl" CFLAGS="-fsanitize=address" CC=clang-9
       os: linux
       compiler: clang
-    - env: SSLLIB="openssl" OPENSSL_VERSION="1.1.0h"
+    - env: SSLLIB="openssl" OPENSSL_VERSION="1.1.1c" CC=clang-9
       os: linux
       compiler: clang
     - env: SSLLIB="mbedtls"
       os: linux
       compiler: gcc
-    - env: SSLLIB="mbedtls" CFLAGS="-fsanitize=address"
+    - env: SSLLIB="mbedtls" CFLAGS="-fsanitize=address" CC=clang-9
       os: linux
       compiler: clang
     - env: SSLLIB="openssl"
       os: osx
-      osx_image: xcode7.3
       compiler: clang
     - env: SSLLIB="mbedtls"
       os: osx
-      osx_image: xcode7.3
       compiler: clang
     - env: SSLLIB="openssl" CHOST=x86_64-w64-mingw32 OPENSSL_VERSION="1.0.1u"
       os: linux
       compiler: ": Win64 build only"
-    - env: SSLLIB="openssl" CHOST=x86_64-w64-mingw32 OPENSSL_VERSION="1.1.0h"
+    - env: SSLLIB="openssl" CHOST=x86_64-w64-mingw32 OPENSSL_VERSION="1.1.1c"
       os: linux
       compiler: ": Win64 build only"
     - env: SSLLIB="openssl" CHOST=i686-w64-mingw32
       os: linux
       compiler: ": Win32 build only"
-    - env: SSLLIB="openssl" EXTRA_CONFIG="--disable-lzo" EXTRA_SCRIPT="make distcheck"
+    - env: SSLLIB="openssl" EXTRA_CONFIG="--disable-lzo" EXTRA_SCRIPT="make distcheck" CC=clang-9
       os: linux
       compiler: clang
-    - env: SSLLIB="openssl" EXTRA_CONFIG="--enable-small"
+    - env: SSLLIB="openssl" EXTRA_CONFIG="--enable-small" CC=clang-9
       os: linux
       compiler: clang
 
 addons:
   apt:
+    sources:
+      - ubuntu-toolchain-r-test
+      - sourceline: 'deb https://apt.llvm.org/xenial/ llvm-toolchain-xenial-9 main'
+        key_url: 'https://apt.llvm.org/llvm-snapshot.gpg.key'
     update: true
-    packages:
-      - liblzo2-dev
-      - libpam0g-dev
-      - liblz4-dev
-      - linux-libc-dev
-      - man2html
+    packages: [ liblzo2-dev, libpam0g-dev, liblz4-dev, linux-libc-dev, man2html, mingw-w64 ]
+  homebrew:
+    update: true
+    packages: [ lzo ]
 
 cache:
   directories:
@@ -85,13 +98,10 @@ cache:
   - ${HOME}/opt
   - ${HOME}/Library/Caches/Homebrew
 
-before_install:
-  - if [ "${TRAVIS_OS_NAME}" = "osx" ]; then brew update     ; fi
-  - if [ "${TRAVIS_OS_NAME}" = "osx" ]; then brew install lzo; fi
-
 install:
+  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$TRAVIS_CPU_ARCH" != "ppc64le" ]; then sudo apt-get install clang-9; fi
   - if [ ! -z "${CHOST}" ]; then unset CC; fi
-  - .travis/build-deps.sh > build-deps.log 2>&1 || (cat build-deps.log && exit 1)
+  - .travis/run-build-deps.sh
 
 before_script:
   - .travis/coverity.sh

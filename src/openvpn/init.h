@@ -56,7 +56,7 @@ bool print_openssl_info(const struct options *options);
 
 bool do_genkey(const struct options *options);
 
-bool do_persist_tuntap(const struct options *options);
+bool do_persist_tuntap(const struct options *options, openvpn_net_ctx_t *ctx);
 
 bool possibly_become_daemon(const struct options *options);
 
@@ -76,7 +76,8 @@ void do_route(const struct options *options,
               struct route_ipv6_list *route_ipv6_list,
               const struct tuntap *tt,
               const struct plugin_list *plugins,
-              struct env_set *es);
+              struct env_set *es,
+              openvpn_net_ctx_t *ctx);
 
 void close_instance(struct context *c);
 
@@ -119,7 +120,7 @@ void initialization_sequence_completed(struct context *c, const unsigned int fla
 
 #ifdef ENABLE_MANAGEMENT
 
-void init_management(struct context *c);
+void init_management(void);
 
 bool open_management(struct context *c);
 

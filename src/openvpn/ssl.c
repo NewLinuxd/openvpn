@@ -59,6 +59,7 @@
 #include "ssl.h"
 #include "ssl_verify.h"
 #include "ssl_backend.h"
+#include "auth_token.h"
 
 #include "memdbg.h"
 
@@ -1348,11 +1349,9 @@ tls_multi_free(struct tls_multi *multi, bool clear)
 
     ASSERT(multi);
 
-#ifdef MANAGEMENT_DEF_AUTH
-    man_def_auth_set_client_reason(multi, NULL);
-
-#endif
 #if P2MP_SERVER
+    auth_set_client_reason(multi, NULL);
+
     free(multi->peer_info);
 #endif
 
@@ -1368,11 +1367,7 @@ tls_multi_free(struct tls_multi *multi, bool clear)
 
     cert_hash_free(multi->locked_cert_hash_set);
 
-    if (multi->auth_token)
-    {
-        secure_memzero(multi->auth_token, AUTH_TOKEN_SIZE);
-        free(multi->auth_token);
-    }
+    wipe_auth_token(multi);
 
     free(multi->remote_ciphername);
 
@@ -1990,7 +1985,8 @@ cleanup:
 
 bool
 tls_session_update_crypto_params(struct tls_session *session,
-                                 struct options *options, struct frame *frame)
+                                 struct options *options, struct frame *frame,
+                                 struct frame *frame_fragment)
 {
     if (!session->opt->server
         && 0 != strcmp(options->ciphername, session->opt->config_ciphername)
@@ -2033,6 +2029,22 @@ tls_session_update_crypto_params(struct tls_session *session,
                    options->ce.tun_mtu_defined, options->ce.tun_mtu);
     frame_init_mssfix(frame, options);
     frame_print(frame, D_MTU_INFO, "Data Channel MTU parms");
+
+    /*
+     * mssfix uses data channel framing, which at this point contains
+     * actual overhead. Fragmentation logic uses frame_fragment, which
+     * still contains worst case overhead. Replace it with actual overhead
+     * to prevent unneeded fragmentation.
+     */
+
+    if (frame_fragment)
+    {
+        frame_remove_from_extra_frame(frame_fragment, crypto_max_overhead());
+        crypto_adjust_frame_parameters(frame_fragment, &session->opt->key_type,
+	                               options->replay, packet_id_long_form);
+        frame_set_mtu_dynamic(frame_fragment, options->ce.fragment, SET_MTU_UPPER_BOUND);
+        frame_print(frame_fragment, D_MTU_INFO, "Fragmentation MTU parms");
+    }
 
     return tls_session_generate_data_channel_keys(session);
 }
@@ -2324,7 +2336,7 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
         {
             /* push mac addr */
             struct route_gateway_info rgi;
-            get_default_gateway(&rgi);
+            get_default_gateway(&rgi, session->opt->net_ctx);
             if (rgi.flags & RGI_HWADDR_DEFINED)
             {
                 buf_printf(&out, "IV_HWADDR=%s\n", format_hex_ex(rgi.hwaddr, 6, 0, 1, ":", &gc));
@@ -4182,12 +4194,11 @@ show_available_tls_ciphers(const char *cipher_list,
 {
     printf("Available TLS Ciphers, listed in order of preference:\n");
 
-#if (ENABLE_CRYPTO_OPENSSL && OPENSSL_VERSION_NUMBER >= 0x1010100fL)
-    printf("\nFor TLS 1.3 and newer (--tls-ciphersuites):\n\n");
-    show_available_tls_ciphers_list(cipher_list_tls13, tls_cert_profile, true);
-#else
-    (void) cipher_list_tls13;  /* Avoid unused warning */
-#endif
+    if (tls_version_max() >= TLS_VER_1_3)
+    {
+        printf("\nFor TLS 1.3 and newer (--tls-ciphersuites):\n\n");
+        show_available_tls_ciphers_list(cipher_list_tls13, tls_cert_profile, true);
+    }
 
     printf("\nFor TLS 1.2 and older (--tls-cipher):\n\n");
     show_available_tls_ciphers_list(cipher_list, tls_cert_profile, false);

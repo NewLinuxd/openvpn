@@ -45,6 +45,7 @@
 #include "gremlin.h"
 #include "mstats.h"
 #include "ssl_verify.h"
+#include "vlan.h"
 #include <inttypes.h>
 
 #include "memdbg.h"
@@ -557,8 +558,7 @@ setenv_stats(struct context *c)
 }
 
 static void
-multi_client_disconnect_setenv(struct multi_context *m,
-                               struct multi_instance *mi)
+multi_client_disconnect_setenv(struct multi_instance *mi)
 {
     /* setenv client real IP address */
     setenv_trusted(mi->context.c2.es, get_link_socket_info(&mi->context));
@@ -571,13 +571,12 @@ multi_client_disconnect_setenv(struct multi_context *m,
 }
 
 static void
-multi_client_disconnect_script(struct multi_context *m,
-                               struct multi_instance *mi)
+multi_client_disconnect_script(struct multi_instance *mi)
 {
     if ((mi->context.c2.context_auth == CAS_SUCCEEDED && mi->connection_established_flag)
         || mi->context.c2.context_auth == CAS_PARTIAL)
     {
-        multi_client_disconnect_setenv(m, mi);
+        multi_client_disconnect_setenv(mi);
 
         if (plugin_defined(mi->context.plugins, OPENVPN_PLUGIN_CLIENT_DISCONNECT))
         {
@@ -684,7 +683,7 @@ multi_close_instance(struct multi_context *m,
     set_cc_config(mi, NULL);
 #endif
 
-    multi_client_disconnect_script(m, mi);
+    multi_client_disconnect_script(mi);
 
     if (mi->did_open_context)
     {
@@ -1112,7 +1111,7 @@ multi_learn_addr(struct multi_context *m,
 
         if (oldroute) /* route already exists? */
         {
-            if (route_quota_test(m, mi) && learn_address_script(m, mi, "update", &newroute->addr))
+            if (route_quota_test(mi) && learn_address_script(m, mi, "update", &newroute->addr))
             {
                 learn_succeeded = true;
                 owner = mi;
@@ -1129,7 +1128,7 @@ multi_learn_addr(struct multi_context *m,
         }
         else
         {
-            if (route_quota_test(m, mi) && learn_address_script(m, mi, "add", &newroute->addr))
+            if (route_quota_test(mi) && learn_address_script(m, mi, "add", &newroute->addr))
             {
                 learn_succeeded = true;
                 owner = mi;
@@ -1579,7 +1578,7 @@ multi_select_virtual_addr(struct multi_context *m, struct multi_instance *mi)
  * Set virtual address environmental variables.
  */
 static void
-multi_set_virtual_addr_env(struct multi_context *m, struct multi_instance *mi)
+multi_set_virtual_addr_env(struct multi_instance *mi)
 {
     setenv_del(mi->context.c2.es, "ifconfig_pool_local_ip");
     setenv_del(mi->context.c2.es, "ifconfig_pool_remote_ip");
@@ -1658,7 +1657,7 @@ multi_client_connect_post(struct multi_context *m,
          * directory or any --ifconfig-pool dynamic address.
          */
         multi_select_virtual_addr(m, mi);
-        multi_set_virtual_addr_env(m, mi);
+        multi_set_virtual_addr_env(mi);
     }
 }
 
@@ -1702,7 +1701,7 @@ multi_client_connect_post_plugin(struct multi_context *m,
          * directory or any --ifconfig-pool dynamic address.
          */
         multi_select_virtual_addr(m, mi);
-        multi_set_virtual_addr_env(m, mi);
+        multi_set_virtual_addr_env(mi);
     }
 }
 
@@ -1742,7 +1741,7 @@ multi_client_connect_mda(struct multi_context *m,
          * directory or any --ifconfig-pool dynamic address.
          */
         multi_select_virtual_addr(m, mi);
-        multi_set_virtual_addr_env(m, mi);
+        multi_set_virtual_addr_env(mi);
     }
 }
 
@@ -1761,7 +1760,7 @@ multi_client_connect_setenv(struct multi_context *m,
     setenv_trusted(mi->context.c2.es, get_link_socket_info(&mi->context));
 
     /* setenv client virtual IP address */
-    multi_set_virtual_addr_env(m, mi);
+    multi_set_virtual_addr_env(mi);
 
     /* setenv connection time */
     {
@@ -2210,7 +2209,8 @@ static void
 multi_bcast(struct multi_context *m,
             const struct buffer *buf,
             const struct multi_instance *sender_instance,
-            const struct mroute_addr *sender_addr)
+            const struct mroute_addr *sender_addr,
+            uint16_t vid)
 {
     struct hash_iterator hi;
     struct hash_element *he;
@@ -2260,6 +2260,10 @@ multi_bcast(struct multi_context *m,
                     }
                 }
 #endif /* ifdef ENABLE_PF */
+                if (vid != 0 && vid != mi->context.options.vlan_pvid)
+                {
+                    continue;
+                }
                 multi_add_mbuf(m, mi, mb);
             }
         }
@@ -2566,6 +2570,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                                                                &dest,
                                                                NULL,
                                                                NULL,
+                                                               0,
                                                                &c->c2.to_tun,
                                                                DEV_TYPE_TUN);
 
@@ -2597,7 +2602,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                     if (mroute_flags & MROUTE_EXTRACT_MCAST)
                     {
                         /* for now, treat multicast as broadcast */
-                        multi_bcast(m, &c->c2.to_tun, m->pending, NULL);
+                        multi_bcast(m, &c->c2.to_tun, m->pending, NULL, 0);
                     }
                     else /* possible client to client routing */
                     {
@@ -2638,10 +2643,25 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
             }
             else if (TUNNEL_TYPE(m->top.c1.tuntap) == DEV_TYPE_TAP)
             {
+                uint16_t vid = 0;
 #ifdef ENABLE_PF
                 struct mroute_addr edest;
                 mroute_addr_reset(&edest);
 #endif
+
+                if (m->top.options.vlan_tagging)
+                {
+                    if (vlan_is_tagged(&c->c2.to_tun))
+                    {
+                        /* Drop VLAN-tagged frame. */
+                        msg(D_VLAN_DEBUG, "dropping incoming VLAN-tagged frame");
+                        c->c2.to_tun.len = 0;
+                    }
+                    else
+                    {
+                        vid = c->options.vlan_pvid;
+                    }
+                }
                 /* extract packet source and dest addresses */
                 mroute_flags = mroute_extract_addr_from_packet(&src,
                                                                &dest,
@@ -2651,6 +2671,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
 #else
                                                                NULL,
 #endif
+                                                               vid,
                                                                &c->c2.to_tun,
                                                                DEV_TYPE_TAP);
 
@@ -2663,7 +2684,8 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                         {
                             if (mroute_flags & (MROUTE_EXTRACT_BCAST|MROUTE_EXTRACT_MCAST))
                             {
-                                multi_bcast(m, &c->c2.to_tun, m->pending, NULL);
+                                multi_bcast(m, &c->c2.to_tun, m->pending, NULL,
+                                            vid);
                             }
                             else /* try client-to-client routing */
                             {
@@ -2741,6 +2763,7 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
         unsigned int mroute_flags;
         struct mroute_addr src, dest;
         const int dev_type = TUNNEL_TYPE(m->top.c1.tuntap);
+        int16_t vid = 0;
 
 #ifdef ENABLE_PF
         struct mroute_addr esrc, *e1, *e2;
@@ -2765,6 +2788,15 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
             return true;
         }
 
+        if (dev_type == DEV_TYPE_TAP && m->top.options.vlan_tagging)
+        {
+            vid = vlan_decapsulate(&m->top, &m->top.c2.buf);
+            if (vid < 0)
+            {
+                return false;
+            }
+        }
+
         /*
          * Route an incoming tun/tap packet to
          * the appropriate multi_instance object.
@@ -2778,6 +2810,7 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
                                                        NULL,
 #endif
                                                        NULL,
+                                                       vid,
                                                        &m->top.c2.buf,
                                                        dev_type);
 
@@ -2790,9 +2823,9 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
             {
                 /* for now, treat multicast as broadcast */
 #ifdef ENABLE_PF
-                multi_bcast(m, &m->top.c2.buf, NULL, e2);
+                multi_bcast(m, &m->top.c2.buf, NULL, e2, vid);
 #else
-                multi_bcast(m, &m->top.c2.buf, NULL, NULL);
+                multi_bcast(m, &m->top.c2.buf, NULL, NULL, vid);
 #endif
             }
             else
@@ -2936,7 +2969,7 @@ multi_process_drop_outgoing_tun(struct multi_context *m, const unsigned int mpp_
  */
 
 void
-route_quota_exceeded(const struct multi_context *m, const struct multi_instance *mi)
+route_quota_exceeded(const struct multi_instance *mi)
 {
     struct gc_arena gc = gc_new();
     msg(D_ROUTE_QUOTA, "MULTI ROUTE: route quota (%d) exceeded for %s (see --max-routes-per-client option)",
@@ -2974,7 +3007,7 @@ gremlin_flood_clients(struct multi_context *m)
 
         for (i = 0; i < parm.n_packets; ++i)
         {
-            multi_bcast(m, &buf, NULL, NULL);
+            multi_bcast(m, &buf, NULL, NULL, 0);
         }
 
         gc_free(&gc);
@@ -3370,12 +3403,6 @@ init_management_callback_multi(struct multi_context *m)
         management_set_callback(management, &cb);
     }
 #endif /* ifdef ENABLE_MANAGEMENT */
-}
-
-void
-uninit_management_callback_multi(struct multi_context *m)
-{
-    uninit_management_callback();
 }
 
 /*

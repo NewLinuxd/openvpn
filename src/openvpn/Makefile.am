@@ -39,6 +39,7 @@ sbin_PROGRAMS = openvpn
 
 openvpn_SOURCES = \
 	argv.c argv.h \
+	auth_token.c auth_token.h \
 	base64.c base64.h \
 	basic.h \
 	buffer.c buffer.h \
@@ -80,6 +81,9 @@ openvpn_SOURCES = \
 	mtu.c mtu.h \
 	mudp.c mudp.h \
 	multi.c multi.h \
+	networking_iproute2.c networking_iproute2.h \
+	networking_sitnl.c networking_sitnl.h \
+	networking.h \
 	ntlm.c ntlm.h \
 	occ.c occ.h \
 	openssl_compat.h \
@@ -120,6 +124,7 @@ openvpn_SOURCES = \
 	syshead.h \
 	tls_crypt.c tls_crypt.h \
 	tun.c tun.h \
+	vlan.c vlan.h \
 	win32.h win32.c \
 	cryptoapi.h cryptoapi.c
 openvpn_LDADD = \
@@ -133,6 +138,6 @@ openvpn_LDADD = \
 	$(OPTIONAL_SYSTEMD_LIBS) \
 	$(OPTIONAL_DL_LIBS)
 if WIN32
-openvpn_SOURCES += openvpn_win32_resources.rc block_dns.c block_dns.h
-openvpn_LDADD += -lgdi32 -lws2_32 -lwininet -lcrypt32 -liphlpapi -lwinmm -lfwpuclnt -lrpcrt4 -lncrypt
+openvpn_SOURCES += openvpn_win32_resources.rc block_dns.c block_dns.h ring_buffer.c ring_buffer.h
+openvpn_LDADD += -lgdi32 -lws2_32 -lwininet -lcrypt32 -liphlpapi -lwinmm -lfwpuclnt -lrpcrt4 -lncrypt -lsetupapi
 endif

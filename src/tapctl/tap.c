@@ -1,5 +1,6 @@
 /*
  *  tapctl -- Utility to manipulate TUN/TAP interfaces on Windows
+ *            https://community.openvpn.net/openvpn/wiki/Tapctl
  *
  *  Copyright (C) 2018 Simon Rozman <simon@rozman.si>
  *
@@ -40,7 +41,7 @@
 
 const static GUID GUID_DEVCLASS_NET = { 0x4d36e972L, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
 
-const static TCHAR szzHardwareIDs[] = TEXT("root\\") TEXT(TAP_WIN_COMPONENT_ID) TEXT("\0");
+const static TCHAR szzDefaultHardwareIDs[] = TEXT("root\\") TEXT(TAP_WIN_COMPONENT_ID) TEXT("\0");
 
 const static TCHAR szInterfaceRegKeyPathTemplate[] = TEXT("SYSTEM\\CurrentControlSet\\Control\\Network\\%") TEXT(PRIsLPOLESTR) TEXT("\\%") TEXT(PRIsLPOLESTR) TEXT("\\Connection");
 #define INTERFACE_REGKEY_PATH_MAX (_countof(TEXT("SYSTEM\\CurrentControlSet\\Control\\Network\\")) - 1 + 38 + _countof(TEXT("\\")) - 1 + 38 + _countof(TEXT("\\Connection")))
@@ -140,6 +141,12 @@ get_reg_string(
         {
             /* Read value. */
             LPTSTR szValue = (LPTSTR)malloc(dwSize);
+            if (szValue == NULL)
+            {
+                msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, dwSize);
+                return ERROR_OUTOFMEMORY;
+            }
+
             dwResult = RegQueryValueEx(
                 hKey,
                 szName,
@@ -167,6 +174,13 @@ get_reg_string(
                     dwSizeExp / sizeof(TCHAR) - 1;     /* Note: ANSI version requires one extra char. */
 #endif
                 LPTSTR szValueExp = (LPTSTR)malloc(dwSizeExp);
+                if (szValueExp == NULL)
+                {
+                    free(szValue);
+                    msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, dwSizeExp);
+                    return ERROR_OUTOFMEMORY;
+                }
+
                 DWORD dwCountExpResult = ExpandEnvironmentStrings(
                     szValue,
                     szValueExp, dwCountExp
@@ -197,6 +211,13 @@ get_reg_string(
 #endif
                     dwCountExp = dwCountExpResult;
                     szValueExp = (LPTSTR)malloc(dwSizeExp);
+                    if (szValueExp == NULL)
+                    {
+                        free(szValue);
+                        msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, dwSizeExp);
+                        return ERROR_OUTOFMEMORY;
+                    }
+
                     dwCountExpResult = ExpandEnvironmentStrings(
                         szValue,
                         szValueExp, dwCountExp);
@@ -356,6 +377,12 @@ get_device_reg_property(
     {
         /* Copy from stack. */
         *ppData = malloc(dwRequiredSize);
+        if (*ppData == NULL)
+        {
+            msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, dwRequiredSize);
+            return ERROR_OUTOFMEMORY;
+        }
+
         memcpy(*ppData, bBufStack, dwRequiredSize);
         return ERROR_SUCCESS;
     }
@@ -366,6 +393,12 @@ get_device_reg_property(
         {
             /* Allocate on heap and retry. */
             *ppData = malloc(dwRequiredSize);
+            if (*ppData == NULL)
+            {
+                msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, dwRequiredSize);
+                return ERROR_OUTOFMEMORY;
+            }
+
             if (SetupDiGetDeviceRegistryProperty(
                     hDeviceInfoSet,
                     pDeviceInfoData,
@@ -415,6 +448,7 @@ DWORD
 tap_create_interface(
     _In_opt_ HWND hwndParent,
     _In_opt_ LPCTSTR szDeviceDescription,
+    _In_opt_ LPCTSTR szHwId,
     _Inout_ LPBOOL pbRebootRequired,
     _Out_ LPGUID pguidInterface)
 {
@@ -424,6 +458,11 @@ tap_create_interface(
         || pguidInterface == NULL)
     {
         return ERROR_BAD_ARGUMENTS;
+    }
+
+    if (szHwId == NULL)
+    {
+        szHwId = szzDefaultHardwareIDs;
     }
 
     /* Create an empty device info set for network adapter device class. */
@@ -479,7 +518,7 @@ tap_create_interface(
             hDevInfoList,
             &devinfo_data,
             SPDRP_HARDWAREID,
-            (const BYTE *)szzHardwareIDs, sizeof(szzHardwareIDs)))
+            (const BYTE *)szHwId, (DWORD)((_tcslen(szHwId) + 1) * sizeof(TCHAR))))
     {
         dwResult = GetLastError();
         msg(M_NONFATAL, "%s: SetupDiSetDeviceRegistryProperty failed", __FUNCTION__);
@@ -499,6 +538,12 @@ tap_create_interface(
     DWORDLONG dwlDriverVersion = 0;
     DWORD drvinfo_detail_data_size = sizeof(SP_DRVINFO_DETAIL_DATA) + 0x100;
     SP_DRVINFO_DETAIL_DATA *drvinfo_detail_data = (SP_DRVINFO_DETAIL_DATA *)malloc(drvinfo_detail_data_size);
+    if (drvinfo_detail_data == NULL)
+    {
+        msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, drvinfo_detail_data_size);
+        dwResult = ERROR_OUTOFMEMORY; goto cleanup_DriverInfoList;
+    }
+
     for (DWORD dwIndex = 0;; dwIndex++)
     {
         /* Get a driver from the list. */
@@ -543,6 +588,11 @@ tap_create_interface(
 
                 drvinfo_detail_data_size = dwSize;
                 drvinfo_detail_data = (SP_DRVINFO_DETAIL_DATA *)malloc(drvinfo_detail_data_size);
+                if (drvinfo_detail_data == NULL)
+                {
+                    msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, drvinfo_detail_data_size);
+                    dwResult = ERROR_OUTOFMEMORY; goto cleanup_DriverInfoList;
+                }
 
                 /* Re-get driver info details. */
                 drvinfo_detail_data->cbSize = sizeof(SP_DRVINFO_DETAIL_DATA);
@@ -572,7 +622,7 @@ tap_create_interface(
             /* Search the list of hardware IDs. */
             for (LPTSTR szHwdID = drvinfo_detail_data->HardwareID; szHwdID && szHwdID[0]; szHwdID += _tcslen(szHwdID) + 1)
             {
-                if (_tcsicmp(szHwdID, szzHardwareIDs) == 0)
+                if (_tcsicmp(szHwdID, szHwId) == 0)
                 {
                     /* Matching hardware ID found. Select the driver. */
                     if (!SetupDiSetSelectedDriver(
@@ -599,7 +649,7 @@ tap_create_interface(
     if (dwlDriverVersion == 0)
     {
         dwResult = ERROR_NOT_FOUND;
-        msg(M_NONFATAL, "%s: No driver for device \"%" PRIsLPTSTR "\" installed.", __FUNCTION__, szzHardwareIDs);
+        msg(M_NONFATAL, "%s: No driver for device \"%" PRIsLPTSTR "\" installed.", __FUNCTION__, szHwId);
         goto cleanup_DriverInfoList;
     }
 
@@ -909,13 +959,20 @@ cleanup_szInterfaceId:
 DWORD
 tap_list_interfaces(
     _In_opt_ HWND hwndParent,
-    _Out_ struct tap_interface_node **ppInterface)
+    _In_opt_ LPCTSTR szHwId,
+    _Out_ struct tap_interface_node **ppInterface,
+    _In_ BOOL bAll)
 {
     DWORD dwResult;
 
     if (ppInterface == NULL)
     {
         return ERROR_BAD_ARGUMENTS;
+    }
+
+    if (szHwId == NULL)
+    {
+        szHwId = szzDefaultHardwareIDs;
     }
 
     /* Create a list of network devices. */
@@ -971,19 +1028,6 @@ tap_list_interfaces(
             }
         }
 
-        /* Get interface GUID. */
-        GUID guidInterface;
-        dwResult = get_net_interface_guid(hDevInfoList, &devinfo_data, 1, &guidInterface);
-        if (dwResult != ERROR_SUCCESS)
-        {
-            /* Something is wrong with this device. Skip it. */
-            continue;
-        }
-
-        /* Get the interface GUID as string. */
-        LPOLESTR szInterfaceId = NULL;
-        StringFromIID((REFIID)&guidInterface, &szInterfaceId);
-
         /* Get device hardware ID(s). */
         DWORD dwDataType = REG_NONE;
         LPTSTR szzDeviceHardwareIDs = NULL;
@@ -995,8 +1039,56 @@ tap_list_interfaces(
             (LPVOID)&szzDeviceHardwareIDs);
         if (dwResult != ERROR_SUCCESS)
         {
-            goto cleanup_szInterfaceId;
+            /* Something is wrong with this device. Skip it. */
+            continue;
         }
+
+        /* Check that hardware ID is REG_SZ/REG_MULTI_SZ, and optionally if it matches ours. */
+        if (dwDataType == REG_SZ)
+        {
+            if (!bAll && _tcsicmp(szzDeviceHardwareIDs, szHwId) != 0)
+            {
+                /* This is not our device. Skip it. */
+                goto cleanup_szzDeviceHardwareIDs;
+            }
+        }
+        else if (dwDataType == REG_MULTI_SZ)
+        {
+            if (!bAll)
+            {
+                for (LPTSTR szHwdID = szzDeviceHardwareIDs;; szHwdID += _tcslen(szHwdID) + 1)
+                {
+                    if (szHwdID[0] == 0)
+                    {
+                        /* This is not our device. Skip it. */
+                        goto cleanup_szzDeviceHardwareIDs;
+                    }
+                    else if (_tcsicmp(szHwdID, szHwId) == 0)
+                    {
+                        /* This is our device. */
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            /* Unexpected hardware ID format. Skip device. */
+            goto cleanup_szzDeviceHardwareIDs;
+        }
+
+        /* Get interface GUID. */
+        GUID guidInterface;
+        dwResult = get_net_interface_guid(hDevInfoList, &devinfo_data, 1, &guidInterface);
+        if (dwResult != ERROR_SUCCESS)
+        {
+            /* Something is wrong with this device. Skip it. */
+            goto cleanup_szzDeviceHardwareIDs;
+        }
+
+        /* Get the interface GUID as string. */
+        LPOLESTR szInterfaceId = NULL;
+        StringFromIID((REFIID)&guidInterface, &szInterfaceId);
 
         /* Render registry key path. */
         TCHAR szRegKey[INTERFACE_REGKEY_PATH_MAX];
@@ -1018,7 +1110,7 @@ tap_list_interfaces(
         {
             SetLastError(dwResult); /* MSDN does not mention RegOpenKeyEx() to set GetLastError(). But we do have an error code. Set last error manually. */
             msg(M_WARN | M_ERRNO, "%s: RegOpenKeyEx(HKLM, \"%" PRIsLPTSTR "\") failed", __FUNCTION__, szRegKey);
-            goto cleanup_szzDeviceHardwareIDs;
+            goto cleanup_szInterfaceId;
         }
 
         /* Read interface name. */
@@ -1038,6 +1130,12 @@ tap_list_interfaces(
         size_t hwid_size = (_tcszlen(szzDeviceHardwareIDs) + 1) * sizeof(TCHAR);
         size_t name_size = (_tcslen(szName) + 1) * sizeof(TCHAR);
         struct tap_interface_node *node = (struct tap_interface_node *)malloc(sizeof(struct tap_interface_node) + hwid_size + name_size);
+        if (node == NULL)
+        {
+            msg(M_FATAL, "%s: malloc(%u) failed", __FUNCTION__, sizeof(struct tap_interface_node) + hwid_size + name_size);
+            dwResult = ERROR_OUTOFMEMORY; goto cleanup_szName;
+        }
+
         memcpy(&node->guid, &guidInterface, sizeof(GUID));
         node->szzHardwareIDs = (LPTSTR)(node + 1);
         memcpy(node->szzHardwareIDs, szzDeviceHardwareIDs, hwid_size);
@@ -1054,13 +1152,14 @@ tap_list_interfaces(
             *ppInterface = pInterfaceTail = node;
         }
 
+cleanup_szName:
         free(szName);
 cleanup_hKey:
         RegCloseKey(hKey);
-cleanup_szzDeviceHardwareIDs:
-        free(szzDeviceHardwareIDs);
 cleanup_szInterfaceId:
         CoTaskMemFree(szInterfaceId);
+cleanup_szzDeviceHardwareIDs:
+        free(szzDeviceHardwareIDs);
     }
 
     dwResult = ERROR_SUCCESS;
